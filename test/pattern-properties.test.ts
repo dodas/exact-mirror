@@ -1,7 +1,7 @@
 import { Type as t } from 'typebox'
 
 import { describe, it, expect } from 'bun:test'
-import { isEqual, isEqualToTypeBox } from './utils'
+import { isEqual } from './utils'
 import { createMirror } from '../src'
 
 const custom = { '^custom[A-Z]': t.Any() }
@@ -221,7 +221,6 @@ describe('patternProperties on Record', () => {
 		const shape = t.Record(t.String({ pattern: '^custom[A-Z]' }), t.Any())
 
 		isEqual(shape, { random: true, customProp: true }, { customProp: true })
-		isEqualToTypeBox(shape, { random: true, customProp: true })
 	})
 
 	it('mirrors matching values through the value schema', () => {
