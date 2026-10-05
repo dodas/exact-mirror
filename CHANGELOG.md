@@ -1,3 +1,10 @@
+# 1.2.7 - unreleased
+
+Bug fix:
+- an `Object` with `patternProperties` keeps the extra keys a pattern matches instead of dropping them (previously only a fully open `additionalProperties` kept them, along with every other key)
+- a `Record` keyed by a regex (`t.Record(t.String({ pattern }), T)`) drops the keys that don't match, as TypeBox's `Value.Clean` does (#18)
+- the `Record(String, T)` wildcard fast path recognises TypeBox 1.x's `^.*$` as well as `^(.*)$`
+
 # 1.2.6 - 7 Sep 2026
 
 Bug fix:

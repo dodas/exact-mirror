@@ -136,6 +136,11 @@ type MaybeArray<T> = T | T[]
 export interface Instruction<Emit extends boolean = false> {
 	optionals: string[]
 	optionalsInArray: string[][]
+	/**
+	 * Non-wildcard `patternProperties` regexes collected during codegen,
+	 * hoisted into the generated source once each as `pp<i>`
+	 */
+	patterns: string[]
 	parentIsOptional: boolean
 	array: number
 	unions: Validator<any>[][]
@@ -193,16 +198,105 @@ export interface Instruction<Emit extends boolean = false> {
 	removeUnknownUnionType: boolean
 }
 
+// TypeBox 0.x emits `^(.*)$` for Record(String, T), TypeBox 1.x emits `^.*$`
+const isWildcardPattern = (pattern: string) =>
+	pattern === '^(.*)$' || pattern === '^.*$'
+
+const patternRef = (pattern: string, instruction: Instruction) => {
+	let i = instruction.patterns.indexOf(pattern)
+	if (i === -1) i = instruction.patterns.push(pattern) - 1
+
+	return `pp${i}`
+}
+
+/**
+ * Emits `target[key]=<mirrored property[key]>` for the first pattern whose
+ * regex matches `key`, or a raw copy when `additionalProperties` allows
+ * unknown keys. Keys no pattern matches are left out.
+ *
+ * `i` is the array slot the caller's loop took: the element is bound to
+ * `ar<i>p` so a child's optional fields are deleted inside the loop, as in
+ * `handleRecord`
+ */
+const patternAssign = (
+	schema: AnySchema,
+	property: string,
+	key: string,
+	target: string,
+	i: number,
+	instruction: Instruction
+) => {
+	let v = ''
+
+	const patterns = Object.keys(schema.patternProperties!)
+	for (let p = 0; p < patterns.length; p++) {
+		const child = schema.patternProperties![patterns[p]]
+
+		v +=
+			`${p === 0 ? 'if' : 'else if'}(${patternRef(patterns[p], instruction)}.test(${key})){` +
+			`const ar${i}p=${property}[${key}];` +
+			`${target}[${key}]=${mirror(child, `ar${i}p`, {
+				...instruction,
+				recursion: instruction.recursion + 1
+			})}`
+
+		const optionals = instruction.optionalsInArray[i + 1]
+		if (optionals) {
+			for (let oi = 0; oi < optionals.length; oi++) {
+				const t = `${target}[${key}]${optionals[oi]}`
+
+				v += `;if(${t}===undefined)delete ${t}`
+			}
+			instruction.optionalsInArray[i + 1] = []
+		}
+
+		v += `}`
+	}
+
+	if (schema.additionalProperties)
+		v += `else{${target}[${key}]=${property}[${key}]}`
+
+	return v
+}
+
 const handleRecord = (
 	schema: TRecord,
 	property: string,
 	instruction: Instruction
 ) => {
-	const child =
-		schema.patternProperties['^(.*)$'] ??
-		schema.patternProperties[Object.keys(schema.patternProperties)[0]]
+	const patterns = Object.keys(schema.patternProperties)
 
-	if (!child) return property
+	if (!patterns.length) return property
+
+	const child =
+		patterns.length === 1 && isWildcardPattern(patterns[0])
+			? schema.patternProperties[patterns[0]]
+			: undefined
+
+	// keyed by a regex: copy only the keys a pattern matches
+	if (!child) {
+		const i = instruction.array
+		instruction.array++
+
+		return (
+			`(()=>{` +
+			`const ar${i}s=Object.keys(${property}),` +
+			`ar${i}v=Object.create(null);` +
+			`for(let i=0;i<ar${i}s.length;i++){` +
+			`const ar${i}k=ar${i}s[i];` +
+			patternAssign(
+				schema,
+				property,
+				`ar${i}k`,
+				`ar${i}v`,
+				i,
+				instruction
+			) +
+			`}` +
+			`return Object.setPrototypeOf(ar${i}v,Object.prototype)` +
+			`})()`
+		)
+	}
 
 	const i = instruction.array
 	instruction.array++
@@ -702,6 +796,34 @@ const mirrorNode = (
 
 			v += '}'
 
+			if (
+				schema.patternProperties &&
+				!schema.additionalProperties &&
+				Object.keys(schema.patternProperties).length
+			) {
+				const i = instruction.array
+				instruction.array++
+
+				// `in` also skips inherited names such as `__proto__`, so a
+				// hostile key matching a pattern can't reach the prototype
+				v =
+					`((ar${i}o)=>{` +
+					`const ar${i}s=Object.keys(${property});` +
+					`for(let i=0;i<ar${i}s.length;i++){` +
+					`const ar${i}k=ar${i}s[i];` +
+					`if(ar${i}k in ar${i}o)continue;` +
+					patternAssign(
+						schema,
+						property,
+						`ar${i}k`,
+						`ar${i}o`,
+						i,
+						instruction
+					) +
+					`}` +
+					`return ar${i}o})(${v})`
+			}
+
 			break
 
 		case 'array':
@@ -904,7 +1026,10 @@ export const createMirror = <T extends TSchema, Emit extends boolean = false>(
 
 	if (typeof sanitize === 'function') sanitize = [sanitize]
 
+	const patterns: string[] = []
+
 	const f = mirror(schema as any, 'v', {
+		patterns,
 		optionals: [],
 		optionalsInArray: [],
 		array: 0,
@@ -925,7 +1050,9 @@ export const createMirror = <T extends TSchema, Emit extends boolean = false>(
 		codecs
 	})
 
-	const fns = cyclic.fns.length ? cyclic.fns.join('\n') + '\n' : ''
+	let fns = cyclic.fns.length ? cyclic.fns.join('\n') + '\n' : ''
+	for (let i = 0; i < patterns.length; i++)
+		fns += `const pp${i}=new RegExp(${JSON.stringify(patterns[i])});\n`
 
 	if (!unions.length && !sanitize?.length && !codecs.length) {
 		if (emit) return { source: fns + f, externals: undefined } as any
